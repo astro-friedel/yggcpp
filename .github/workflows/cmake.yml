@@ -23,7 +23,7 @@ jobs:
       run: |
         sudo pip3 install numpy
         sudo apt-get update
-        sudo apt-get install -y libboost-log-dev libgomp1 libczmq-dev
+        sudo apt-get install -y libboost-log-dev libgomp1 libczmq-dev lcov libzmq3-dev libcmocka-dev
         
     - name: Configure CMake
       # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
@@ -41,7 +41,11 @@ jobs:
       run: make test
 
     - name: Coverage
-      uses: romeovs/lcov-reporter-action@v0.2.16
-      with:
-        working-directory: ${{github.workspace}}/build
-        lcov-file: coverage.info
+      working-directory: ${{github.workspace}}/build
+      run: make coverage
+      
+    #- name: Coverage report
+    #  uses: romeovs/lcov-reporter-action@v0.2.11
+    #  with:
+    #    github-token: ${{ secrets.GITHUB_TOKEN }}
+    #    lcov-file: ${{github.workspace}}/build/coverage.info

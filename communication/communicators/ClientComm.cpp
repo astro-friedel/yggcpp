@@ -1,4 +1,5 @@
 #include "ClientComm.hpp"
+#include "utils/tools.hpp"
 
 using namespace communication::communicator;
 using namespace communication::utils;
@@ -6,7 +7,8 @@ using namespace communication::datatypes;
 
 unsigned ClientComm::_client_rand_seeded = 0;
 
-ClientComm::ClientComm(const std::string &name, Address *address, Direction direction, DataType* datatype) : COMM_BASE(name, address, direction, datatype) {
+ClientComm::ClientComm(const std::string &name, Address *address, DIRECTION direction) :
+        COMM_BASE(name, address, direction) {
     comm = nullptr;
     request_id.clear();
     data.clear();
@@ -29,15 +31,15 @@ ClientComm::ClientComm(const std::string &name, Address *address, Direction dire
         return;
 
     // Called to initialize/create client comm
-    DataType *dtype_out = nullptr;
+
     if (this->direction != NONE) {
         dtype_out = create_dtype_format(this->direction, 0, false);
     }
     if (this->name.empty()) {
-        base_handle = new COMM_BASE("", this->address, SEND, dtype_out);
+        base_handle = new COMM_BASE("", this->address, SEND);
         base_handle->name = "client_request." + this->address->address();
     } else {
-        base_handle = new COMM_BASE(this->name, nullptr, SEND, dtype_out);
+        base_handle = new COMM_BASE(this->name, nullptr, SEND);
     }
     base_handle->flags |= COMM_FLAG_CLIENT;
     base_handle->init();
@@ -154,11 +156,10 @@ int ClientComm::comm_nmsg() const  {
     return base_handle->comm_nmsg();
 }
 
-comm_head_t ClientComm::response_header(comm_head_t head) {
+communication::datatypes::CommHead ClientComm::response_header(datatypes::CommHead head) {
     // Initialize new comm
     if (comm == nullptr) {
-        DataType * dtype_copy = copy_dtype(datatype);
-        comm = new COMM_BASE("", nullptr, RECV, dtype_copy);
+        comm = new COMM_BASE("", nullptr, RECV);
         comm->flags |= COMM_FLAG_CLIENT_RESPONSE;
         //int ret = comm->new_address();
         comm->const_flags |= COMM_EOF_SENT | COMM_EOF_RECV;
@@ -218,7 +219,7 @@ long ClientComm::recv(char** rdata, const size_t &rlen, bool allow_realloc)  {
                          name.c_str(), ret);
             return ret;
         }
-        auto head = comm_head_t(*rdata, rlen);
+        auto head = datatypes::CommHead(*rdata, rlen);
         if (!(head.flags & HEAD_FLAG_VALID)) {
             ygglog_error("client_comm_recv(%s): Invalid header.", name.c_str());
             return -1;

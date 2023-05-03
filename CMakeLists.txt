@@ -1,12 +1,24 @@
-cmake_minimum_required(VERSION 3.0)
-project(YggInterfaceCPP)
+cmake_minimum_required(VERSION 3.16)
 
+if (POLICY CMP0048)
+    cmake_policy(SET CMP0048 NEW)
+endif (POLICY CMP0048)
+
+project(YggInterfaceCPP VERSION 0.1.0.0)
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 ADD_DEFINITIONS(-D_CRT_SECURE_NO_WARNINGS)
-
-
+include(FetchContent)
+FetchContent_Declare(
+        RapidJSON_ygg
+        GIT_REPOSITORY https://github.com/astro-friedel/rapidjson_ygg.git
+        GIT_TAG 8563bd7301ef2d96fae35f883d030f79a84b7d04
+)
+#FetchContent_Declare(
+#        Cppzmq
+#        GIT_REPOSITORY https://github.com/zeromq/cppzmq.git
+#)
 
 if("${CMAKE_SOURCE_DIR}" STREQUAL "${CMAKE_BINARY_DIR}")
     message(FATAL_ERROR "In-source build prohibited.")
@@ -14,11 +26,14 @@ endif("${CMAKE_SOURCE_DIR}" STREQUAL "${CMAKE_BINARY_DIR}")
 
 set(CMAKE_MODULE_PATH "${CMAKE_MODULE_PATH};${PROJECT_SOURCE_DIR}/cmake")
 
-file(GLOB_RECURSE SOURCES "communication/**/*.cpp")
+#file(GLOB_RECURSE SOURCES "communication/**/*.cpp")
+file(GLOB SOURCES "communication/utils/*.cpp" "communication/communicators/*.cpp")
+option(YGG_BUILD_TESTS "Build tests" ON)
+option(YGG_BUILD_THIRDPARTY_GTEST "Use gtest installation in 'thirdpart/gtest' by default if available" ON)
 
 set(YGG_BUILD_FLAGS "")
 #find cppzmq wrapper, installed by make of cppzmq
-find_package(cppzmq)
+#find_package(cppzmq)
 ########################################################################
 # LIBZMQ dependency
 ########################################################################
@@ -35,14 +50,17 @@ find_package(cppzmq)
 #ELSE (libzmq_FOUND)
 #    message("libzmq not found." )
 #ENDIF (libzmq_FOUND)
-IF (cppzmq_FOUND)
-    message("Found cppzmq   ${ZeroMQ_INCLUDE_DIRS}  XX")
-    include_directories("/opt/anaconda3/include")
-    set(YGG_BUILD_FLAGS = "${YGG_BUILD_FLAGS} -DZMQ_BUILD_DRAFT_API")
-ENDIF()
+#IF (cppzmq_FOUND)
+#    include_directories("${cppzmq_INCLUDE_DIR}")
+#    add_definitions(-DZMQ_BUILD_DRAFT_API)
+#ELSE()
+#    FetchContent_MakeAvailable(Cppzmq)
+#ENDIF()
 
-find_package(Boost REQUIRED)
+find_package(Boost COMPONENTS log REQUIRED)
 include_directories(${Boost_INCLUDE_DIRS})
+add_definitions(-DBOOST_LOG_DYN_LINK)
+
 ########################################################################
 # LIBCZMQ dependency
 ########################################################################
@@ -56,21 +74,41 @@ IF (libczmq_FOUND)
     ELSE (PC_LIBCZMQ_FOUND)
         set(pkg_config_libs_private "${pkg_config_libs_private} -lczmq")
     ENDIF (PC_LIBCZMQ_FOUND)
-    set(YGG_BUILD_FLAGS "${YGG_BUILD_FLAGS} -DZMQINSTALLED")
+    add_definitions(-DZMQINSTALLED)
 ELSE (libczmq_FOUND)
     message("libczmq not found." )
 ENDIF (libczmq_FOUND)
 
 find_package(OpenMP)
 if (OpenMP_FOUND)
-    set(YGG_BUILD_FLAGS "${YGG_BUILD_FLAGS} -D_OPENMP -DMPIINSTALLED")
+    add_definitions(-D_OPENMP -DMPIINSTALLED)
+else()
+    message("NO OpenMP")
 endif()
 
 find_package(Python3 COMPONENTS Interpreter Development NumPy REQUIRED)
 include_directories(${Python_INCLUDE_DIRS})
+include_directories(${Python3_NumPy_INCLUDE_DIRS})
+set(YGG_PYTHON_ENV "DATADIR=${CMAKE_SOURCE_DIR}/test;YGG_PYTHON_EXEC=${Python3_EXECUTABLE}")
+
+# There is an issue with embedding Python on Windows in conda environments
+# https://github.com/ContinuumIO/anaconda-issues/issues/11374
+if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+    set(YGG_PYTHON_ENV "${YGG_PYTHON_ENV};PYTHONHOME=${Python3_RUNTIME_LIBRARY_DIRS}")
+endif()
+
 add_library(YggInterface SHARED ${SOURCES})
 target_link_libraries(YggInterface ${PYTHON_LIBRARIES} Python3::NumPy)
+target_link_libraries(YggInterface ${Boost_LOG_LIBRARY})
+
 include_directories("communication")
+
+FetchContent_MakeAvailable(RapidJSON_ygg)
+include_directories("${rapidjson_ygg_SOURCE_DIR}/include")
+message("XYZ  ${rapidjson_ygg_SOURCE_DIR}/include")
+add_definitions(-DRAPIDJSON_YGGDRASIL)
+add_definitions(-DNPY_NO_DEPRECATED_API=NPY_1_7_API_VERSION)
+add_definitions(-D_USE_MATH_DEFINES)
 
 IF (WIN32)
     ADD_LIBRARY(regex_win32 STATIC IMPORTED)
@@ -91,7 +129,7 @@ IF (WIN32)
                 czmq PROPERTIES
                 IMPORTED_LOCATION C:\\projects\\build_czmq\\Debug\\czmq.lib)
         TARGET_LINK_LIBRARIES(YggInterface czmq)
-        set(YGG_BUILD_FLAGS "${YGG_BUILD_FLAGS} -DIPCINSTALLED")
+        add_definitions(-DIPCINSTALLED)
     endif()
 ELSE(WIN32)
     if (libzmq_FOUND)
@@ -99,11 +137,36 @@ ELSE(WIN32)
     endif()
     if (libczmq_FOUND)
         target_link_libraries(YggInterface ${libczmq_LIBRARIES})
-        set(YGG_BUILD_FLAGS "${YGG_BUILD_FLAGS} -DIPCINSTALLED")
+        add_definitions(-DIPCINSTALLED)
     endif()
 ENDIF(WIN32)
 
-set(CMAKE_CXX_FLAGS_DEBUG "-g -DYGG_DEBUG${BUILD_FLAGS}${YGG_BUILD_FLAGS}")
-set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG${BUILD_FLAGS}${YGG_BUILD_FLAGS}")
-set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O2 -g -DYGG_DEBUG${BUILD_FLAGS}${YGG_BUILD_FLAGS}")
+if(YGG_BUILD_TESTS)
+    if(MSVC11)
+        # required for VS2012 due to missing support for variadic templates
+        add_definitions(-D_VARIADIC_MAX=10)
+    endif(MSVC11)
+
+    add_subdirectory(test)
+    include(CTest)
+    add_definitions(-DYGG_TEST)
+    if(YGG_ENABLE_COVERAGE)
+        target_link_libraries(YggInterface gcov)
+        # find required tools
+        find_program(LCOV lcov REQUIRED)
+        find_program(GENHTML genhtml REQUIRED)
+        add_custom_target(coverage
+                # gather data
+                COMMAND ${LCOV} --rc lcov_branch_coverage=1 --exclude '/usr/*' --exclude '/opt/*' --directory . --capture --output-file coverage.info
+                # generate report
+                COMMAND ${GENHTML} --rc genhtml_branch_coverage=1 --demangle-cpp -o coverage coverage.info
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+        set(YGG_BUILD_FLAGS "${YGG_BUILD_FLAGS} --coverage -fno-inline -fno-inline-small-functions -fno-default-inline -fpermissive")
+    endif(YGG_ENABLE_COVERAGE)
+endif()
+add_link_options(-L/opt/anaconda3/envs/Yggdrasil/lib)
+#message(${YGG_BUILD_FLAGS})
+set(CMAKE_CXX_FLAGS_DEBUG "-g -DNDEBUG -DYGG_DEBUG${BUILD_FLAGS}${YGG_BUILD_FLAGS} -fpermissive")
+set(CMAKE_CXX_FLAGS_RELEASE "-g -DNDEBUG -DYGG_DEBUG${BUILD_FLAGS}${YGG_BUILD_FLAGS} -fpermissive")
+set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-g -DNDEBUG -DYGG_DEBUG${BUILD_FLAGS}${YGG_BUILD_FLAGS} -fpermissive")
 
