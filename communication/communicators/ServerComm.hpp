@@ -2,19 +2,20 @@
 
 #include <vector>
 #include "DefaultComm.hpp"
-#include "datatypes/CommHead.hpp"
+#include "CommHead.hpp"
+#include "CommBase.hpp"
+
+#ifdef COMM_BASE
+namespace communication {
+namespace communicator {
 #ifdef _OPENMP
 #pragma omp threadprivate(_default_comm)
 #endif
-#include "CommBase.hpp"
-
-namespace communication {
-namespace communicator {
 
 // @brief Structure for storing requests
 class ServerComm : public COMM_BASE {
 public:
-    explicit ServerComm(const std::string &name = "", utils::Address *address = nullptr, DIRECTION direction = NONE);
+    explicit ServerComm(const std::string &name = "", utils::Address *address = nullptr);
 
     ~ServerComm() override;
 
@@ -39,20 +40,24 @@ public:
     int comm_nmsg() const override;
 
     datatypes::CommHead response_header(datatypes::CommHead &head);
+    using Comm_t::send;
+    using Comm_t::recv;
 
+protected:
     int send(const char *data, const size_t &len) override;
 
-    long recv(char **data, const size_t &len, bool allow_realloc) override;
-    int send(const dtype_t* dtype) override;
-    long recv(dtype_t* dtype) override;
+    long recv(char *data, const size_t &len, bool allow_realloc) override;
 
-private:
+#ifndef YGG_TEST
+    private:
+#endif
     ::std::vector<Comm_t *> comms; //!< Array of response comms.
     ::std::vector<std::string> response_id; //!< Response ids.
     ::std::vector<std::string> request_id; //!< Request ids.
     ::std::vector<size_t> comm_idx; //!< Index of comm associated w/ a request
-    COMM_BASE *base_handle;
 };
 
 }
 } // communication
+
+#endif

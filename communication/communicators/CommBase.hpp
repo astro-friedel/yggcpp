@@ -1,5 +1,6 @@
 #pragma once
 
+
 #include "utils/enums.hpp"
 #include "utils/Address.hpp"
 #include "utils/logging.hpp"
@@ -10,8 +11,6 @@
 //#include "datatypes/YggObj.hpp"
 #include "rapidjson/document.h"
 #include "rapidjson/writer.h"
-
-//#define __cplusplus
 
 /*! @brief Bit flags. */
 #define COMM_FLAG_VALID   0x00000001  //!< Set if the comm is initialized
@@ -36,9 +35,7 @@
 
 
 namespace communication {
-namespace datatypes {
 
-}
 namespace communicator {
 class ServerComm;
 
@@ -48,21 +45,26 @@ class Comm_t {
 public:
     virtual ~Comm_t();
 
-    virtual int send(const char *data, const size_t &len) = 0;
-    virtual int send(const dtype_t* dtype) = 0;
-
-    virtual long recv(char **data, const size_t &len, bool allow_realloc) = 0;
-    virtual long recv(dtype_t* dtype) = 0;
+    int send(const dtype_t* dtype);
+    long recv(dtype_t* dtype);
 
     virtual int comm_nmsg() const = 0;
 
     COMM_TYPE getType() const { return type; }
+    bool valid() {return flags & COMM_FLAG_VALID;}
 
-    bool valid() const { return _valid; }
-
+#ifdef YGG_TEST
+    std::string getName() {return name;}
+#endif
 protected:
     friend ServerComm;
     friend ClientComm;
+
+    int send(const std::string message) {
+        return send(message.c_str(), message.size());
+    }
+    virtual int send(const char *data, const size_t &len) = 0;
+    virtual long recv(char *data, const size_t &len, bool allow_realloc) = 0;
 
     //Comm_t(const Comm_t* comm, COMM_TYPE type);
     Comm_t(utils::Address *address, DIRECTION direction, const COMM_TYPE &t, int flgs = 0);
@@ -88,9 +90,9 @@ protected:
     int index_in_register; //!< Index of the comm in the comm register.
     time_t *last_send; //!< Clock output at time of last send.
     int thread_id; //!< ID for the thread that created the comm.
-    bool _valid;
 };
 
+Comm_t* new_Comm_t(const DIRECTION dir, const COMM_TYPE type, const std::string &name="", char* address=nullptr);
 /*!
       @brief Communication structure.
      */
@@ -99,24 +101,24 @@ class CommBase : public Comm_t {
 public:
     CommBase() = delete;
 
-    int send(const char *data, const size_t &len) override {
-        utils::ygglog_throw_error("Send of base class called, must be overridden");
-        return -1;
-    }
-    int send(const dtype_t* dtype) override;
-    long recv(dtype_t* dtype) override;
-
-    long recv(char **data, const size_t &len, bool allow_realloc) override {
-        utils::ygglog_throw_error("Recv of base class called, must be overridden");
-        return -1;
-    }
-
     int comm_nmsg() const override {
         utils::ygglog_throw_error("Comm_nmsg of base class called, must be overridden");
         return -1;
     }
+    using Comm_t::send;
+    using Comm_t::recv;
 
 protected:
+    int send(const char *data, const size_t &len) override {
+        utils::ygglog_throw_error("Send of base class called, must be overridden");
+        return -1;
+    }
+
+    long recv(char *data, const size_t &len, bool allow_realloc) override {
+        utils::ygglog_throw_error("Recv of base class called, must be overridden");
+        return -1;
+    }
+
     CommBase(utils::Address *address, DIRECTION direction, const COMM_TYPE &t);
 
     //CommBase(Comm_t* comm, const COMM_TYPE &type);
@@ -157,59 +159,14 @@ void CommBase<H, R>::reset() {
 
 template<typename H, typename R>
 CommBase<H, R>::~CommBase() {
-    utils::ygglog_debug("~CommBase: Started");
+    ygglog_debug << "~CommBase: Started";
     if (handle != nullptr)
         delete handle;
     if (reply != nullptr)
         delete reply;
-    utils::ygglog_debug("~CommBase: Finished");
+    ygglog_debug << "~CommBase: Finished";
 }
 
-template<typename H, typename R>
-int CommBase<H, R>::send(const dtype_t* dtype) {
-    if (dtype == nullptr)
-        return -1;
-    rapidjson::Document type_doc;
-    rapidjson::StringBuffer buffer;
-    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
-    switch (dtype->type) {
-        case T_SCALAR: {
-            int x = 5;
-            type_doc.Set(x);
-            break;
-        }
-        case T_PLY: {
-            type_doc.Set(*(static_cast<rapidjson::Ply *>(dtype->obj)));
-            break;
-        }
-        case T_OBJ: {
-            //type_doc.Set(*(static_cast<rapidjson::ObjBase *>(dtype->obj)));
-            break;
-        }
-        case T_PLY_T: {
-            //datatypes::YggPly tempPly(static_cast<ply_t *>(dtype->obj));
-            //type_doc.Set(tempPly);
-            break;
-        }
-        case T_OBJ_T: {
-            //datatypes::YggObj tempObj(static_cast<obj_t *>(dtype->obj));
-            //type_doc.Set(tempObj);
-            break;
-        }
-        default:
-            break;
-    }
-    type_doc.Accept(writer);
-    const size_t len = buffer.GetLength();
-    const char* data = buffer.GetString();
-    return this->send(data, len);
-}
-
-template<typename H, typename R>
-long CommBase<H, R>::recv(dtype_t* dtype) {
-    return -1;
-
-}
 
 }
 }

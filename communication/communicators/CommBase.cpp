@@ -5,7 +5,7 @@ using namespace communication::utils;
 
 
 Comm_t::Comm_t(Address *address, DIRECTION dirn, const COMM_TYPE &t, int flgs) :
-        address(address), type(t), _valid(false), direction(direction), flags(flgs) {
+        address(address), type(t), direction(dirn), flags(flgs) {
     name = "";
 
     flags |= COMM_FLAG_VALID;
@@ -60,11 +60,13 @@ Comm_t::Comm_t(const std::string &name, DIRECTION direction, const COMM_TYPE &t)
             }
             addr = getenv(temp_name.c_str());
         }
-        ygglog_debug("init_comm_base: model_name = %s, full_name = %s, address = %s",
-                     model_name, full_name.c_str(), addr);
+        ygglog_debug << "init_comm_base: model_name = " << model_name << ", full_name = " << full_name
+                     << ", address = " << addr;
         this->name = full_name;
         if (addr != nullptr) {
             this->address->address(addr);
+            if (this->address->valid())
+                flags |= COMM_FLAG_VALID;
         }
         this->name = name;
     } else {
@@ -72,11 +74,10 @@ Comm_t::Comm_t(const std::string &name, DIRECTION direction, const COMM_TYPE &t)
     }
 
     if (!this->address->valid() && t != SERVER_COMM && t != CLIENT_COMM) {
-        ygglog_error("init_comm_base: %s not registered as environment variable.\n",
-                     full_name.c_str());
+        ygglog_error << "init_comm_base: " << full_name << " not registered as environment variable.\n";
         flags &= ~COMM_FLAG_VALID;
     }
-    ygglog_debug("init_comm_base(%s): Done", name.c_str());
+    ygglog_debug << "init_comm_base(" << name << "): Done";
 
 }
 
@@ -95,16 +96,15 @@ Comm_t::Comm_t(const std::string &name, DIRECTION direction, const COMM_TYPE &t)
     index_in_register = comm->index_in_register;
     *last_send = *(comm->last_send);
     thread_id = comm->thread_id;
-    _valid = comm->_valid;
 }*/
 
 Comm_t::~Comm_t() {
-    ygglog_debug("~CommBase: Started");
+    ygglog_debug << "~CommBase: Started";
     if (last_send != nullptr)
         delete last_send;
     if (address != nullptr)
         delete address;
-    ygglog_debug("~CommBase: Finished");
+    ygglog_debug << "~CommBase: Finished";
 }
 
 bool Comm_t::check_size(const size_t &len) const {
@@ -114,30 +114,27 @@ bool Comm_t::check_size(const size_t &len) const {
 #endif
     // Make sure you aren't sending a message that is too big
     if (len > YGG_MSG_MAX) {
-        ygglog_error("comm_base_send(%s): message too large for single packet (YGG_MSG_MAX=%d, len=%d)",
-                     name.c_str(), YGG_MSG_MAX, len);
+        ygglog_error << "comm_base_send(" << name << "): message too large for single packet (YGG_MSG_MAX="
+                     << YGG_MSG_MAX << ", len=" << len << ")";
         return false;
     }
     return true;
 }
 
-struct comm_t {
-    void* comm;
-};
-
-int free_comm(comm_t* x) {
+/*int free_comm(comm_t* x) {
     auto temp = static_cast<Comm_t*>(x->comm);
     if (temp != nullptr) {
         delete temp;
         temp = nullptr;
         free(x);
     }
-}
+    return 0;
+}*/
 //comm_t* empty_comm() {
 //    comm_t* comm;
 //
 //}
-Comm_t* new_Comm_t(const DIRECTION dir, const COMM_TYPE type, const std::string &name="", char* address=nullptr) {
+Comm_t* communication::communicator::new_Comm_t(const DIRECTION dir, const COMM_TYPE type, const std::string &name, char* address) {
     switch(type) {
         case NULL_COMM:
             break;
@@ -146,21 +143,16 @@ Comm_t* new_Comm_t(const DIRECTION dir, const COMM_TYPE type, const std::string 
         case ZMQ_COMM:
             return new ZMQComm(name, (address == nullptr) ? nullptr : new Address(address), dir);
         case SERVER_COMM:
-            return new ServerComm(name, (address == nullptr) ? nullptr : new Address(address), dir);
+            return new ServerComm(name, (address == nullptr) ? nullptr : new Address(address));
         case CLIENT_COMM:
-            return new ClientComm(name, (address == nullptr) ? nullptr : new Address(address), dir);
-        case ASCII_FILE_COMM:
-            return new AsciiFileComm(name, dir);
-        case ASCII_TABLE_COMM:
-            return new AsciiTableComm(name, dir);
-        case ASCII_TABLE_ARRAY_COMM:
-            break;
+            return new ClientComm(name, (address == nullptr) ? nullptr : new Address(address));
         case MPI_COMM:
-            std::string adr;
-            return new MPIComm(name, (address == nullptr) ? adr : reinterpret_cast<std::string &>(address), dir);
+            //std::string adr;
+            return new MPIComm(name, (address == nullptr) ? nullptr : new Address(address), dir);
     }
+    return nullptr;
 }
-comm_t* new_comm(char* address, const DIRECTION dir, const COMM_TYPE type) {
+/*comm_t* new_comm(char* address, const DIRECTION dir, const COMM_TYPE type) {
     auto comm = (comm_t*)malloc(sizeof(comm_t));
     comm->comm = new_Comm_t(dir, type, "", address);
     return comm;
@@ -169,7 +161,26 @@ comm_t* init_comm(const char* name, const DIRECTION dir, const COMM_TYPE type) {
     auto comm = (comm_t*)malloc(sizeof(comm_t));
     comm->comm = new_Comm_t(dir, type, name);
     return comm;
+}*/
+
+int Comm_t::send(const dtype_t *dtype) {
+    rapidjson::Document *doc = static_cast<rapidjson::Document*>(dtype->schema);
+    rapidjson::StringBuffer buffer;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+    doc->Accept(writer);
+    return this->send(buffer.GetString(), buffer.GetSize());
 }
+
+long Comm_t::recv(dtype_t *dtype) {
+    char *data = (char *) malloc(sizeof(char) * YGG_MSG_MAX);
+    long size = recv(data, YGG_MSG_MAX, true);
+    if (dtype->schema == nullptr)
+        dtype->schema = (void *) new rapidjson::Document();
+    static_cast<rapidjson::Document *>(dtype->schema)->Parse(data);
+    free(data);
+    return size;
+}
+
 /*int send(const comm_t* x, const char *data, const size_t &len) {
     auto comm = (Comm_t*)x->comm;
     return comm->send(data, len);

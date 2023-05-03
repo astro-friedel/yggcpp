@@ -5,10 +5,10 @@
 
 namespace communication {
 namespace utils {
-
+static std::string blank = "";
 class Address {
 public:
-    Address(const std::string &adr = "");
+    Address(const std::string &adr = blank);
 
     Address(const char *adr);
 
@@ -23,9 +23,13 @@ public:
     bool operator==(const Address &adr);
 
     bool valid() const;
+    friend std::ostream &operator<<(std::ostream &out, const Address &addr) {
+        out << addr._address;
+        return out;
+    }
 
 private:
-    std::string _address;
+    std::string _address = "";
     int _key;
     bool _valid;
 

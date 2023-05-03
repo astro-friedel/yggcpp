@@ -1,11 +1,80 @@
 #include "CommHead.hpp"
 #include "utils/logging.hpp"
 #include "utils/tools.hpp"
+#include "utils/regex.hpp"
 
 using namespace communication::datatypes;
 using namespace communication::utils;
 
-CommHead::CommHead(utils::Address* adr, const std::string &id): address(adr), id(id){
+#ifndef MSG_HEAD_SEP
+#define MSG_HEAD_SEP "YGG_MSG_HEAD"
+#endif
+
+/*!
+  @brief Split header and body of message.
+  @param[in] buf const char* Message that should be split.
+  @param[in] buf_siz size_t Size of buf.
+  @param[out] head const char** pointer to buffer where the extracted header
+  should be stored.
+  @param[out] headsiz size_t reference to memory where size of extracted header
+  should be stored.
+  @returns: int 0 if split is successful, -1 if there was an error.
+*/
+int split_head_body(const char *buf, const size_t buf_siz,
+                    char **head, size_t *headsiz) {
+    // Split buffer into head and body
+    int ret;
+    size_t sind, eind, sind_head, eind_head;
+    sind = 0;
+    eind = 0;
+#ifdef _WIN32
+    // Windows regex of newline is buggy
+  UNUSED(buf_siz);
+  size_t sind1, eind1, sind2, eind2;
+  char re_head_tag[COMMBUFFSIZ];
+  sprintf(re_head_tag, "(%s)", MSG_HEAD_SEP);
+  ret = find_match(re_head_tag, buf, &sind1, &eind1);
+  if (ret > 0) {
+    sind = sind1;
+    ret = find_match(re_head_tag, buf + eind1, &sind2, &eind2);
+    if (ret > 0)
+      eind = eind1 + eind2;
+  }
+#else
+    // Extract just header
+    char re_head[COMMBUFFSIZ] = MSG_HEAD_SEP;
+    strcat(re_head, "(.*)");
+    strcat(re_head, MSG_HEAD_SEP);
+    // strcat(re_head, ".*");
+    ret = static_cast<int>(communication::utils::find_match(re_head, buf, sind, eind));
+#endif
+    if (ret < 0) {
+        ygglog_error <<"split_head_body: Could not find header in " << buf;
+        return -1;
+    } else if (ret == 0) {
+#ifdef YGG_DEBUG
+        ygglog_debug << "split_head_body: No header in " << buf;
+#endif
+        sind_head = 0;
+        eind_head = 0;
+    } else {
+        sind_head = sind + strlen(MSG_HEAD_SEP);
+        eind_head = eind - strlen(MSG_HEAD_SEP);
+    }
+    headsiz[0] = (eind_head - sind_head);
+    char* temp = (char*)realloc(*head, *headsiz + 1);
+    if (temp == nullptr) {
+        ygglog_error << "split_head_body: Failed to reallocate header.";
+        return -1;
+    }
+    *head = temp;
+    memcpy(*head, buf + sind_head, *headsiz);
+    (*head)[*headsiz] = '\0';
+    return 0;
+}
+
+
+CommHead::CommHead(utils::Address* adr, const std::string id): address(adr), id(id){
     // Parameters set during read
     bodysiz = 0;
     bodybeg = 0;
@@ -33,7 +102,7 @@ CommHead::CommHead(const char *buf, const size_t &buf_siz) {
         // Split header/body
         ret = split_head_body(buf, buf_siz, &head, &headsiz);
         if (ret < 0) {
-            utils::ygglog_error("parse_comm_header: Error splitting head and body.");
+            ygglog_error << "parse_comm_header: Error splitting head and body.";
             flags &= ~HEAD_FLAG_VALID;
             if (head != nullptr)
                 free(head);
@@ -54,14 +123,15 @@ CommHead::CommHead(const char *buf, const size_t &buf_siz) {
         if (!(head_doc.IsObject()))
             ygglog_throw_error("parse_comm_header: Parsed header document is not an object.");
         if (head_doc.HasMember("datatype")) {
-            dtype = new DataType(type_from_header_doc(head_doc), false);
-        } else if (head_doc.HasMember("type_in_data")) {
+        //    dtype = new DataType(type_from_header_doc(head_doc), false);
+        // TODO: fix
+        //} else if (head_doc.HasMember("type_in_data")) {
             dtype = nullptr;
-        } else {
-            dtype = create_dtype_direct();
+        //} else {
+        //    dtype = create_dtype_direct();
         }
         if (!(update_header_from_doc(head_doc))) {
-            ygglog_error("parse_comm_header: Error updating header from JSON doc.");
+            ygglog_error << "parse_comm_header: Error updating header from JSON doc.";
             flags &= ~HEAD_FLAG_VALID;
             delete dtype;
             dtype = nullptr;
@@ -70,7 +140,7 @@ CommHead::CommHead(const char *buf, const size_t &buf_siz) {
         }
         free(head);
     } catch(...) {
-        ygglog_error("parse_comm_header: C++ exception thrown.");
+        ygglog_error << "parse_comm_header: C++ exception thrown.";
         flags &= ~HEAD_FLAG_VALID;
         if (head != nullptr)
             free(head);
@@ -80,16 +150,16 @@ CommHead::CommHead(const char *buf, const size_t &buf_siz) {
 bool CommHead::update_header_from_doc(rapidjson::Value &head_doc) {
     // Type
     if (!(head_doc.IsObject())) {
-        ygglog_error("update_header_from_doc: head document must be an object.");
+        ygglog_error << "update_header_from_doc: head document must be an object.";
         return false;
     }
     // Size
     if (!(head_doc.HasMember("size"))) {
-        ygglog_error("update_header_from_doc: No size information in the header.");
+        ygglog_error << "update_header_from_doc: No size information in the header.";
         return false;
     }
     if (!(head_doc["size"].IsInt())) {
-        ygglog_error("update_header_from_doc: Size is not integer.");
+        ygglog_error << "update_header_from_doc: Size is not integer.";
         return false;
     }
     size = (size_t)(head_doc["size"].GetInt());
@@ -101,7 +171,7 @@ bool CommHead::update_header_from_doc(rapidjson::Value &head_doc) {
     // Flag specifying that type is in data
     if (head_doc.HasMember("type_in_data")) {
         if (!(head_doc["type_in_data"].IsBool())) {
-            ygglog_error("update_header_from_doc: type_in_data is not boolean.");
+            ygglog_error << "update_header_from_doc: type_in_data is not boolean.";
             return false;
         }
         if (head_doc["type_in_data"].GetBool()) {
@@ -116,13 +186,13 @@ bool CommHead::update_header_from_doc(rapidjson::Value &head_doc) {
     for (const auto& n : string_fields) {
         if (head_doc.HasMember(n.second.c_str())) {
             if (!(head_doc[n.second.c_str()].IsString())) {
-                ygglog_error("update_header_from_doc: '%s' is not a string.", n.second.c_str());
+                ygglog_error << "update_header_from_doc: '" << n.second << "' is not a string.";
                 return false;
             }
             const std::string value(head_doc[n.second.c_str()].GetString());
             if (value.size() > COMMBUFFSIZ) {
-                ygglog_error("update_header_from_doc: Size of value for key '%s' (%d) exceeds size of target buffer (%d).",
-                             n.second.c_str(), std::to_string(value.size()).c_str(), COMMBUFFSIZ);
+                ygglog_error << "update_header_from_doc: Size of value for key '" << n.second << "' ("
+                             << value.size() << ") exceeds size of target buffer (" << COMMBUFFSIZ << ").";
                 return false;
             }
             switch (n.first) {
@@ -164,8 +234,6 @@ bool CommHead::update_header_from_doc(rapidjson::Value &head_doc) {
 }
 
 CommHead::~CommHead() {
-    if (dtype != nullptr)
-        delete dtype;
     if (address != nullptr)
         delete address;
     if (response_address != nullptr)

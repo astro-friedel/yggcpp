@@ -4,13 +4,13 @@
 
 using namespace communication::communicator;
 using namespace communication::utils;
-using namespace communication::datatypes;
+//using namespace communication::datatypes;
 
 #if defined(MPIINSTALLED) && defined(MPI_COMM_WORLD)
 
 mpi_registry_t &mpi_registry_t::Clone() const {
     MPI_Comm ncomm;
-    MPI_Comm_dup( (MPI_Comm)the_real_comm, &ncomm);
+    MPI_Comm_dup( (MPI_Comm)this->mpi_comm, &ncomm);
     auto *clone = new mpi_registry_t(ncomm);
     return *clone;
 }
@@ -46,12 +46,14 @@ MPIComm::MPIComm(const std::string &name, utils::Address *address, const DIRECTI
 
     //if (!(comm->flags & COMM_FLAG_VALID))
     //    return -1;
+    if (address == nullptr)
+        throw std::runtime_error("No address specified for MPIComm constructor");
     if (name.empty()) {
         this->name = "tempinitMPI." + address->address();
     }
     handle = new mpi_registry_t(MPI_COMM_WORLD);
     if (handle == nullptr) {
-        ygglog_error("init_mpi_comm: Could not alloc MPI registry.");
+        ygglog_error << "init_mpi_comm: Could not alloc MPI registry.";
         return;
     }
     handle->nproc = 0;
@@ -61,6 +63,13 @@ MPIComm::MPIComm(const std::string &name, utils::Address *address, const DIRECTI
     std::vector<std::string> adrs;
     boost::split(adrs, address->address(), boost::is_any_of(","));
     handle->nproc += static_cast<int>(adrs.size());
+    addresses.push_back(address);
+    if (adrs.size() > 1) {
+        addresses[0]->address(adrs[0]);
+        for (size_t i = 1; i < adrs.size(); i++) {
+            addresses.push_back(new communication::utils::Address(adrs[i]));
+        }
+    }
 
     size_t ibeg, iend;
 
@@ -68,7 +77,7 @@ MPIComm::MPIComm(const std::string &name, utils::Address *address, const DIRECTI
         ibeg = a.find("[");
         iend = a.find("]");
         if (ibeg != std::string::npos) {
-            handle->procs.push_back(stoi(a.substr(ibeg, iend-ibeg)));
+            handle->procs.push_back(stoi(a.substr(ibeg+1, iend-ibeg-1)));
         } else {
             handle->procs.push_back(stoi(a));
         }
@@ -81,11 +90,11 @@ MPIComm::~MPIComm() {
     handle = nullptr;
 }
 
-int MPIComm::mpi_comm_source_id() {
+int MPIComm::mpi_comm_source_id() const {
     if (direction == SEND)
         return 0;
     if (handle == nullptr) {
-        ygglog_error("mpi_comm_source_id(%s): Queue handle is NULL.", name.c_str());
+        ygglog_error << "mpi_comm_source_id(" << name << "): Queue handle is NULL.";
         return -1;
     }
     //mpi_registry_t* reg = (mpi_registry_t*)(x->handle);
@@ -98,17 +107,17 @@ int MPIComm::mpi_comm_source_id() {
     //    return -1;
     //}
     if (status.Get_error()) {
-        ygglog_error("mpi_comm_source_id(%s): Error in status for tag = %d: %d",
-                     name.c_str(), handle->tag, status.Get_error());
+        ygglog_error << "mpi_comm_source_id(" << name << "): Error in status for tag = " << handle->tag
+                     << ": " << status.Get_error();
         return -1;
     }
 
     if (status.Is_cancelled()) {
-        ygglog_error("mpi_comm_source_id(%s): Request canceled for tag = %d",
-                     name.c_str(), handle->tag);
+        ygglog_error << "mpi_comm_source_id(" << name << "): Request canceled for tag = " << handle->tag;
         return -1;
     }
-    if (int src = status.Get_source() > 0) {
+    int src = status.Get_source();
+    if (src > 0) {
         for (size_t i = 0; i < handle->nproc; i++) {
             if (handle->procs[i] == src) {
                 return src;
@@ -122,7 +131,7 @@ int MPIComm::comm_nmsg() const {
     int src = mpi_comm_source_id();
     int nmsg = 0;
     if (src < 0) {
-        ygglog_error("mpi_comm_nmsg(%s): Error checking messages.", name.c_str());
+        ygglog_error << "mpi_comm_nmsg(" << name << "): Error checking messages.";
         return -1;
     } else if (src > 0) {
         nmsg = 1;
@@ -131,12 +140,12 @@ int MPIComm::comm_nmsg() const {
 }
 
 int MPIComm::send(const char *data, const size_t &len) {
-    int ret = -1;
-    ygglog_debug("mpi_comm_send(%s): %d bytes", name.c_str(), len);
+    int ret = 0;
+    ygglog_debug << "mpi_comm_send(" << name << "): " << len << " bytes";
     if (!check_size(len))
         return -1;
     if (handle == nullptr) {
-        ygglog_error("mpi_comm_send(%s): Queue handle is NULL.", name.c_str());
+        ygglog_error << "mpi_comm_send(" << name << "): Queue handle is NULL.";
         return -1;
     }
     int len_int = (int)(len);
@@ -153,51 +162,47 @@ int MPIComm::send(const char *data, const size_t &len) {
     //                 name.c_str(), handle->tag);
     //    return -1;
     //}
-    ygglog_debug("mpi_comm_send(%s): returning %d", name.c_str(), ret);
+    ygglog_debug << "mpi_comm_send(" << name << "): returning " <<  ret;
     handle->tag++;
     return ret;
 }
 
-long MPIComm::recv(char** data, const size_t &len, bool allow_realloc) {
-    ygglog_debug("mpi_comm_recv(%s)", name.c_str());
+long MPIComm::recv(char* data, const size_t &len, bool allow_realloc) {
+    ygglog_debug << "mpi_comm_recv(" <<  name << ")";
     MPI::Status status;
     int adr = mpi_comm_source_id();
     handle->Probe(adr, handle->tag, status);
     if (status.Get_error()) {
-        ygglog_error("mpi_comm_nmsg(%s): Error in probe for tag = %d",
-                     name.c_str(), handle->tag);
+        ygglog_error << "mpi_comm_nmsg(" << name << "): Error in probe for tag = " << handle->tag;
         return -1;
     }
     int len_recv = 0;
     handle->Recv(&len_recv, 1, MPI_INT, adr, handle->tag, status);
     if (status.Get_error()) {
-        ygglog_error("mpi_comm_recv(%s): Error receiving message size for tag = %d.",
-                     name.c_str(), handle->tag);
+        ygglog_error << "mpi_comm_recv(" << name << "): Error receiving message size for tag = " << handle->tag;
         return -1;
     }
     if (len_recv > len) {
         if (allow_realloc) {
-            ygglog_debug("mpi_comm_recv(%s): reallocating buffer from %d to %d bytes.",
-                         name.c_str(), len, len_recv);
-            (*data) = (char*)realloc(*data, len_recv);
-            if (*data == nullptr) {
-                ygglog_error("mpi_comm_recv(%s): failed to realloc buffer.", name.c_str());
+            ygglog_debug << "mpi_comm_recv(" << name << "): reallocating buffer from " << len << " to " << len_recv << " bytes.";
+            data = (char*)realloc(data, len_recv);
+            if (data == nullptr) {
+                ygglog_error << "mpi_comm_recv(" << name << "): failed to realloc buffer.";
                 return -1;
             }
         } else {
-            ygglog_error("mpi_comm_recv(%s): buffer (%d bytes) is not large enough for message (%d bytes)",
-                         name.c_str(), len, len_recv);
+            ygglog_error << "mpi_comm_recv(" << name << "): buffer (" << len << " bytes) is not large enough for message ("
+                         << len_recv << " bytes)";
             return -len_recv;
         }
     }
-    handle->Recv(*data, len_recv, MPI_CHAR, adr, handle->tag, status);
+    handle->Recv(data, len_recv, MPI_CHAR, adr, handle->tag, status);
     if (status.Get_error()) {
         // TODO: Check status?
-        ygglog_error("mpi_comm_recv(%s): Error receiving message for tag = %d.",
-                     name.c_str(), handle->tag);
+        ygglog_error << "mpi_comm_recv(" << name << "): Error receiving message for tag = " << handle->tag;
         return -1;
     }
-    ygglog_debug("mpi_comm_recv(%s): returns %d bytes", name.c_str(), len_recv);
+    ygglog_debug << "mpi_comm_recv(" << name << "): returns " << len_recv << " bytes";
     handle->tag++;
     return len_recv;
 }

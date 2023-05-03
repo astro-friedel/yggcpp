@@ -1,6 +1,7 @@
 #pragma once
 
 #include <map>
+#include "datatypes/dtype_t.hpp"
 #include "utils/Address.hpp"
 #include "rapidjson/document.h"
 #include "rapidjson/writer.h"
@@ -27,7 +28,7 @@ const std::map<fields, std::string> string_fields = {{ADDRESS,          "address
 
 class CommHead {
 public:
-    explicit CommHead(utils::Address *adr = nullptr, const std::string &id = "");
+    explicit CommHead(utils::Address *adr = nullptr, const std::string id = "");
 
     CommHead(const char *buf, const size_t &buf_siz);
 
@@ -53,6 +54,7 @@ public:
     std::string field_units; //!< String containing field units.
     //
     //DTYPE dtype;
+    dtype_t *dtype = nullptr;
 private:
     bool update_header_from_doc(rapidjson::Value &head_doc);
 };

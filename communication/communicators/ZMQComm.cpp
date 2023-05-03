@@ -3,25 +3,30 @@
 #ifdef ZMQINSTALLED
 using namespace communication::communicator;
 using namespace communication::utils;
-using namespace communication::datatypes;
+//using namespace communication::datatypes;
 #include <zmq.hpp>
 #include <zmq_addon.hpp>
 #include <boost/algorithm/string.hpp>
 //#include "datatypes/datatypes.hpp"
 #include "utils/tools.hpp"
 #include "utils/logging.hpp"
-#include "datatypes/CommHead.hpp"
+#include "CommHead.hpp"
 
 const std::chrono::milliseconds timeout{1000};
 const std::chrono::milliseconds short_timeout{10};
 #ifdef _OPENMP
 zmq::context_t ygg_sock_t::ygg_s_process_ctx = zmq::context_t();
 bool ygg_sock_t::ctx_valid = true;
+std::vector<ygg_sock_t*> ygg_sock_t::activeSockets = {};
 
-void ygg_sock_t::shutdown() {
+void ygg_sock_t::ctx_shutdown() {
 #pragma omp critical (zmq)
     {
         if (ctx_valid) {
+            // force all sockets to be closed, otherwise the context close will hang
+            for (auto sock : ygg_sock_t::activeSockets) {
+                sock->close();
+            }
             ygg_s_process_ctx.shutdown();
             ygg_s_process_ctx.close();
             ctx_valid = false;
@@ -40,7 +45,7 @@ zmq::context_t &ygg_sock_t::get_context() {
 // TODO??  #pragma omp critical (zmq)
 
 ygg_sock_t::ygg_sock_t(int type) : zmq::socket_t(get_context(), type), tag(0xcafe0004), type(type) {
-#else
+#else // _OPENMP
     zmq::context_t &ygg_sock_t::get_context() {
         zqm::context ctx;
         return ctx;
@@ -50,14 +55,22 @@ ygg_sock_t::ygg_sock_t(int type) : zmq::socket_t(get_context(), type), tag(0xcaf
 
     }
     ygg_sock_t::ygg_sock_t(int type) : zmq::socket_t(get_context(), type) {
-#endif
+#endif // _OPENMP
     set(zmq::sockopt::linger, 0);
     set(zmq::sockopt::immediate, 1);
+    ygg_sock_t::activeSockets.push_back(this);
 }
 
 //#ifdef _OPENMP
 //}
 //#endif
+
+void ygg_sock_t::close() {
+    ygg_sock_t::activeSockets.erase(std::remove(ygg_sock_t::activeSockets.begin(),
+                                                ygg_sock_t::activeSockets.end(),
+                                                this), ygg_sock_t::activeSockets.end());
+    zmq::socket_t::close();
+}
 
 ygg_sock_t::~ygg_sock_t() {
 #ifdef _OPENMP
@@ -72,9 +85,17 @@ void ZMQComm::init() {
     if (!(flags & COMM_FLAG_VALID))
         return;
     if (address == nullptr || !address->valid()) {
-        _valid = new_address();
+        if (new_address()) {
+            flags |= COMM_FLAG_VALID;
+        } else {
+            flags &= ~COMM_FLAG_VALID;
+        }
     } else {
-        _valid = connect_to_existing();
+        if (connect_to_existing()) {
+            flags |= COMM_FLAG_VALID;
+        } else {
+            flags &= ~COMM_FLAG_VALID;
+        }
     }
 }
 
@@ -83,7 +104,7 @@ void ZMQComm::init() {
   @param[in] comm comm_t * Comm structure initialized with init_comm_base.
   @returns int -1 if the comm could not be initialized.
  */
-ZMQComm::ZMQComm(const std::string &name, Address *address, const DIRECTION direction) :
+ZMQComm::ZMQComm(const std::string name, Address *address, const DIRECTION direction) :
         CommBase(address, direction, ZMQ_COMM) {
     init();
 }
@@ -127,7 +148,7 @@ int ZMQComm::find_reply_socket(Address *address) {
         adr = address;
     // Get reply
     if (reply == nullptr) {
-        ygglog_error("find_reply_socket(%s): Reply structure not initialized.", name.c_str());
+        ygglog_error << "find_reply_socket(" << name << "): Reply structure not initialized.";
         return -2;
     }
     for (int i = 0; i < reply->nsockets(); i++) {
@@ -147,26 +168,28 @@ int ZMQComm::find_reply_socket(Address *address) {
 int ZMQComm::do_reply_send() {
     // Get reply
     if (reply == nullptr) {
-        ygglog_error("do_reply_send(%s): Reply structure not initialized.", name.c_str());
+        ygglog_error << "do_reply_send(" << name << ") : Reply structure not initialized.";
         return -1;
     }
     reply->n_msg++;
     if (reply->nsockets() == 0 || reply->sockets[0] == nullptr) {
-        ygglog_error("do_reply_send(%s): Socket is nullptr.", name.c_str());
+        ygglog_error << "do_reply_send(" << name << ") : Socket is nullptr.";
         return -1;
     }
     sock = reply->sockets[0];
     // Poll
-    ygglog_debug("do_reply_send(%s): address=%s, begin", name.c_str(),
-                 reply->addresses[0]->address().c_str());
+    ygglog_debug << "do_reply_send(" << name << ") : address=" << reply->addresses[0]->address()
+                 << ", begin";
 
 //#if defined(__cplusplus) && defined(_WIN32)
     // TODO: There seems to be an error in the poller when using it in C++
 //#else
     zmq::poller_t<> in_poller;
+
     in_poller.add(*sock, zmq::event_flags::pollin);
     std::vector<zmq::poller_event<>> in_events(1);
-    ygglog_debug("do_reply_send(%s): waiting on poller...", name.c_str());
+
+    ygglog_debug << "do_reply_send(" << name << ") : waiting on poller...";
     size_t nin = 0;
     size_t nout = 0;
 
@@ -182,7 +205,7 @@ int ZMQComm::do_reply_send() {
     // Check for EOF
     bool is_purge = false;
     if (msg_data == YGG_MSG_EOF) {
-        ygglog_debug("do_reply_send(%s): EOF received", name.c_str());
+        ygglog_debug << "do_reply_send(" << name << ") : EOF received";
         reply->n_msg = 0;
         reply->n_rep = 0;
         return -2;
@@ -201,10 +224,10 @@ int ZMQComm::do_reply_send() {
     auto sres = out_events[0].socket.send(zmsg, zmq::send_flags::none);
     // Check for purge or EOF
     if (!sres.has_value()) {
-        ygglog_error("do_reply_send(%s): Error sending reply frame.", name.c_str());
+        ygglog_error << "do_reply_send(" << name << ") : Error sending reply frame.";
     } else {
         if (is_purge) {
-            ygglog_debug("do_reply_send(%s): PURGE received", name.c_str());
+            ygglog_debug << "do_reply_send(" << name << ") : PURGE received";
             reply->n_msg = 0;
             reply->n_rep = 0;
             ret = do_reply_send();
@@ -212,15 +235,15 @@ int ZMQComm::do_reply_send() {
             reply->n_rep++;
         }
     }
-    ygglog_debug("do_reply_send(%s): address=%s, end", name.c_str(),
-                 reply->addresses[0]->address().c_str());
+    ygglog_debug << "do_reply_send(" << name << ") : address=" << reply->addresses[0]->address()
+                 << ", end";
 //#if defined(__cplusplus) && defined(_WIN32)
     // TODO: There seems to be an error in the poller when using it in C++
 //#else
     if (sres.has_value()) {
-        ygglog_debug("do_reply_send(%s): waiting on poller...", name.c_str());
+        ygglog_debug << "do_reply_send(" << name << ") : waiting on poller...";
         nout = out_poller.wait_all(out_events, short_timeout);
-        ygglog_debug("do_reply_send(%s): poller returned", name.c_str());
+        ygglog_debug << "do_reply_send(" << name << ") : poller returned";
         if (is_purge)
             return ret;
         return static_cast<int>(sres.value());
@@ -239,45 +262,45 @@ int ZMQComm::do_reply_send() {
 int ZMQComm::do_reply_recv(const int &isock, const char* msg) {
     // Get reply
     if (reply->sockets.size() <= isock) {
-        ygglog_error("do_reply_recv(%s): Socket does not exist", name.c_str());
+        ygglog_error << "do_reply_recv(" << name << ") : Socket does not exist";
     } else if (reply->sockets.at(isock) == nullptr) {
-        ygglog_error("do_reply_recv(%s): Socket is nullptr.", name.c_str());
+        ygglog_error << "do_reply_recv(" << name << ") : Socket is nullptr.";
         return -1;
     }
     sock = reply->sockets[isock];
-    ygglog_debug("do_reply_recv(%s): address=%s, begin", name.c_str(),
-                 reply->addresses[isock]->address().c_str());
+    ygglog_debug << "do_reply_recv(" << name << ") : address=" << reply->addresses[isock]->address()
+                 << ", begin";
     zmq::message_t msg_send(msg);
 
     // Send
     auto ret = sock->send(msg_send, zmq::send_flags::none);
     if (!ret.has_value()) {
-        ygglog_error("do_reply_recv(%s): Error sending confirmation.", name.c_str());
+        ygglog_error << "do_reply_recv(" << name << ") : Error sending confirmation.";
         return -1;
     }
     if (strcmp(msg, YGG_MSG_EOF) == 0) {
-        ygglog_info("do_reply_recv(%s): EOF confirmation.", name.c_str());
+        ygglog_info << "do_reply_recv(" << name << ") : EOF confirmation.";
         reply->n_msg = 0;
         reply->n_rep = 0;
         sock->set(zmq::sockopt::linger, _zmq_sleeptime);
         return -2;
     }
     // Poll to prevent block
-    ygglog_debug("do_reply_recv(%s): address=%s, polling for reply", name.c_str(),
-                 reply->addresses[isock]->address().c_str());
+    ygglog_debug << "do_reply_recv(" << name << ") : address=" << reply->addresses[isock]->address()
+                 << ", polling for reply";
 //#if defined(__cplusplus) && defined(_WIN32)
     // TODO: There seems to be an error in the poller when using it in C++
 //#else
     zmq::poller_t<> poller;
     poller.add(*sock, zmq::event_flags::pollin);
     std::vector<zmq::poller_event<>> events(1);
-    ygglog_debug("do_reply_recv(%s): waiting on poller...", name.c_str());
+    ygglog_debug << "do_reply_recv(" << name << ") : waiting on poller...";
 
     size_t nin = poller.wait_all(events, timeout);
 
-    ygglog_debug("do_reply_recv(%s): poller returned", name.c_str());
+    ygglog_debug << "do_reply_recv(" << name << ") : poller returned";
     if (nin == 0) {
-        ygglog_error("do_reply_recv(%s): Poller failed", name.c_str());
+        ygglog_error << "do_reply_recv(" << name << ") : Poller failed";
         return -1;
     }
 //#endif
@@ -285,12 +308,11 @@ int ZMQComm::do_reply_recv(const int &isock, const char* msg) {
     zmq::message_t msg_recv;
     ret = sock->recv(msg_recv);
     if (msg_recv.empty()) {
-        ygglog_error("do_reply_recv(%s): did not receive", name.c_str());
+        ygglog_error << "do_reply_recv(" << name << ") : did not receive";
         return -1;
     }
     reply->n_rep++;
-    ygglog_debug("do_reply_recv(%s): address=%s, end", name.c_str(),
-                 reply->addresses[isock]->address().c_str());
+    ygglog_debug << "do_reply_recv(" << name << ") : address=" << reply->addresses[isock]->address() << ", end";
     return 0;
 }
 
@@ -303,15 +325,14 @@ std::string ZMQComm::set_reply_send() {
     std::string out;
 
     if (reply == nullptr) {
-        ygglog_error("set_reply_send(%s): Reply structure not initialized.", name.c_str());
+        ygglog_error << "set_reply_send(" << name << ") : Reply structure not initialized.";
         return out;
     }
     // Create socket
     if (reply->nsockets() == 0) {
         reply->sockets.push_back(new ygg_sock_t(ZMQ_REP));
         if (reply->sockets[0] == nullptr) {
-            ygglog_error("set_reply_send(%s): Could not initialize empty socket.",
-                         name.c_str());
+            ygglog_error << "set_reply_send(" << name << ") : Could not initialize empty socket.";
             return out;
         }
         const std::string protocol = "tcp";
@@ -324,21 +345,23 @@ std::string ZMQComm::set_reply_send() {
         {
 #endif
             if (_last_port_set == 0) {
-                ygglog_debug("model_index = %s", getenv("YGG_MODEL_INDEX"));
+                ygglog_debug << "model_index = " << getenv("YGG_MODEL_INDEX");
                 _last_port = 49152 + 1000 * static_cast<int>(strtol(getenv("YGG_MODEL_INDEX"), nullptr, 0));
                 _last_port_set = 1;
-                ygglog_debug("_last_port = %d", _last_port);
+                ygglog_debug << "_last_port = " << _last_port;
             }
             address = protocol + "://" +  host + ":*[" + std::to_string(_last_port + 1) + "]";
             try {
                 reply->sockets[0]->bind(address);
             } catch(zmq::error_t &err) {
-                ygglog_error("set_reply_send(%s): Could not bind socket to address = %s  : %s",
-                             name.c_str(), address.c_str(), err.what());
+                ygglog_error << "set_reply_send(" << name << ") : Could not bind socket to address = "
+                             << address << " : " << err.what();
             }
+            /// This is broken, the socket was just created, so it cannot have a last endpoint
             address = reply->sockets[0]->get(zmq::sockopt::last_endpoint);
             std::vector<std::string> parts;
             boost::split(parts, address, boost::is_any_of(":"));
+            std::vector<std::string> mtemp = parts;
             _last_port = std::stoi(parts.back());
 #ifdef _OPENMP
         }
@@ -347,7 +370,7 @@ std::string ZMQComm::set_reply_send() {
         auto *adr = new Address(address);
 
         reply->addresses.push_back(adr);
-        ygglog_debug("set_reply_send(%s): New reply socket: %s", name.c_str(), address.c_str());
+        ygglog_debug << "set_reply_send(" << name << ") : New reply socket: " << address;
     }
     return reply->addresses[0]->address();
 }
@@ -361,33 +384,32 @@ int ZMQComm::set_reply_recv(Address* adr) {
     int out = -1;
     // Get reply
     if (reply == nullptr) {
-        ygglog_error("set_reply_recv(%s): Reply structure not initialized.", name.c_str());
+        ygglog_error << "set_reply_recv(" << name << ") : Reply structure not initialized.";
         return out;
     }
-    // Match address and create if it dosn't exist
+    // Match address and create if it doesn't exist
     int isock = find_reply_socket(adr);
     if (isock < 0) {
         if (isock == -2) {
-            ygglog_error("set_reply_recv(%s): Error locating socket.", name.c_str());
+            ygglog_error << "set_reply_recv(" << name << ") : Error locating socket.";
             return out;
         }
         // Create new socket
         isock = static_cast<int>(reply->nsockets());
         reply->sockets.push_back(new ygg_sock_t(ZMQ_REQ));
         if (reply->sockets[isock] == nullptr) {
-            ygglog_error("set_reply_recv(%s): Could not initialize empty socket.",
-                         name.c_str());
+            ygglog_error << "set_reply_recv(" << name << ") : Could not initialize empty socket.";
             return out;
         }
         reply->addresses.push_back(adr);
         try {
             reply->sockets[0]->connect(adr->address());
         } catch(zmq::error_t &err) {
-            ygglog_error("set_reply_recv(%s): Could not connect to socket. %s",
-                         name.c_str(), err.what());
+            ygglog_error << "set_reply_recv(" << name << ") : Could not connect to socket. "
+                         << err.what();
             return out;
         }
-        ygglog_debug("set_reply_recv(%s): New recv socket: %s", name.c_str(), adr->address().c_str());
+        ygglog_debug << "set_reply_recv(" << name << ") : New recv socket: " <<  adr->address();
     }
     return isock;
 }
@@ -418,14 +440,14 @@ int ZMQComm::check_reply_recv(const char* data, const size_t &len) {
     int ret;
     // Get reply
     if (reply == nullptr) {
-        ygglog_error("check_reply_recv(%s): Reply structure not initialized.", name.c_str());
+        ygglog_error << "check_reply_recv(" << name << ") : Reply structure not initialized.";
         return -1;
     }
     reply->n_msg++;
     // Extract address
     datatypes::CommHead head(data, len);
     if (!(head.flags & HEAD_FLAG_VALID)) {
-        ygglog_error("check_reply_recv(%s): Invalid header.", name.c_str());
+        ygglog_error << "check_reply_recv(" << name << ") : Invalid header.";
         return -1;
     }
     Address *adr;
@@ -434,21 +456,20 @@ int ZMQComm::check_reply_recv(const char* data, const size_t &len) {
     } else if (head.zmq_reply != nullptr) {
         adr = new Address(*head.zmq_reply);
     } else {
-        ygglog_error("check_reply_recv(%s): Error parsing reply header in '%s'",
-                     name.c_str(), data);
+        ygglog_error << "check_reply_recv(" << name << ") : Error parsing reply header in '" << data << "'";
         return -1;
     }
 
     // Match address and create if it dosn't exist
     int isock = set_reply_recv(address);
     if (isock < 0) {
-        ygglog_error("check_reply_recv(%s): Error setting reply socket.");
+        ygglog_error << "check_reply_recv(" << name << ") : Error setting reply socket.";
         return -1;
     }
     // Confirm message receipt
     ret = do_reply_recv(isock, _reply_msg);
     if (ret < 0) {
-        ygglog_error("check_reply_recv(%s): Error during reply.", name.c_str());
+        ygglog_error << "check_reply_recv(" << name << ") : Error during reply.";
         return -1;
     }
     return new_len;
@@ -459,7 +480,7 @@ int ZMQComm::check_reply_recv(const char* data, const size_t &len) {
   @param[in] comm comm_t * Comm structure initialized with new_comm_base.
   @returns int -1 if the address could not be created.
 */
-int ZMQComm::new_address() {
+bool ZMQComm::new_address() {
     // TODO: Get protocol/host from input
     std::string protocol = "tcp";
     std::string host = "localhost";
@@ -467,7 +488,7 @@ int ZMQComm::new_address() {
     msgBufSize = 100;
     if (host == "localhost")
         host = "127.0.0.1";
-    if (protocol == "inproc" || protocol == "ipc") {
+    /*if (protocol == "inproc" || protocol == "ipc") {
         // TODO: small chance of reusing same number
         int key = 0;
 #ifdef _OPENMP
@@ -485,23 +506,42 @@ int ZMQComm::new_address() {
         if (name.empty())
             name = "tempnewZMQ-" + std::to_string(key);
         adr->address(protocol + "://" + name);
-    } else {
+    } else {*/
 #ifdef _OPENMP
+    std::string except_msg = "";
 #pragma omp critical (zmqport)
         {
 #endif
             if (_last_port_set == 0) {
-                ygglog_debug("model_index = %s", getenv("YGG_MODEL_INDEX"));
-                _last_port = 49152 + 1000 * atoi(getenv("YGG_MODEL_INDEX"));
-                _last_port_set = 1;
-                ygglog_debug("_last_port = %d", _last_port);
+                const char *model_index = getenv("YGG_MODEL_INDEX");
+                if (model_index == nullptr) {
+
+#ifdef _OPENMP
+                    except_msg = "Environment variable 'YGG_MODEL_INDEX' is not defined. Connot create ZMQComm.";
+                    _last_port = -1;
+                } else {
+
+#else
+                    throw std::runtime_error("Environment variable 'YGG_MODEL_INDEX' is not defined. Connot create ZMQComm.");
+                }
+#endif
+
+                    ygglog_debug << "model_index = %s" << model_index;
+                    _last_port = 49152 + 1000 * atoi(model_index);
+                    _last_port_set = 1;
+                    ygglog_debug << "_last_port = " << _last_port;
+#ifdef _OPENMP
+                }
+#endif
             }
             adr->address( protocol + "://" + host + ":" +std::to_string(_last_port + 1));
 #ifdef _OPENMP
         }
+    if (!except_msg.empty())
+        throw std::runtime_error(except_msg);
 #endif
         /* strcat(address, ":!"); // For random port */
-    }
+
     // Bind
     if (handle != nullptr) {
         delete handle;
@@ -516,16 +556,16 @@ int ZMQComm::new_address() {
         handle = new ygg_sock_t(ZMQ_PAIR);
     }
     if (handle == nullptr) {
-        ygglog_error("create_new: Could not initialize empty socket.");
-        return -1;
+        ygglog_error << "create_new: Could not initialize empty socket.";
+        return false;
     }
     //void* libzmq_socket = handle.handle();
     try {
         handle->bind(adr->address().c_str());
     } catch (zmq::error_t &err) {
-        ygglog_error("create_new: Could not bind socket to address = %s  : %s",
-                     adr->address().c_str(), err.what());
-        return -1;
+        ygglog_error << "create_new: Could not bind socket to address = " << adr->address() << " : "
+                     << err.what();
+        return false;
     }
     // Add port to address
     int port = -1;
@@ -549,13 +589,13 @@ int ZMQComm::new_address() {
     if (address != nullptr)
         delete address;
     address = adr;
-    ygglog_debug("create_new: Bound socket to %s", address->address().c_str());
+    ygglog_debug << "create_new: Bound socket to " << address->address();
     if (name.empty())
         name = "tempnewZMQ-" + std::to_string(port);
 
     // Init reply
     init_zmq_reply();
-    return 0;
+    return true;
 }
 
 
@@ -567,13 +607,13 @@ void ZMQComm::destroy() {
     // Drain input
     if (direction == RECV && flags & COMM_FLAG_VALID
         && (!(const_flags & COMM_EOF_RECV))) {
-        if (Logger::_ygg_error_flag == 0) {
+        if (utils::_ygg_error_flag == 0) {
             size_t data_len = 100;
             char *data = (char*)malloc(data_len);
             datatypes::CommHead head;
             bool is_eof_flag = false;
             while (comm_nmsg() > 0) {
-                if (long ret = recv(&data, data_len, true) >= 0) {
+                if (long ret = recv(data, data_len, true) >= 0) {
                     head = datatypes::CommHead(data, ret);
                     if (strncmp(YGG_MSG_EOF, data + head.bodybeg, strlen(YGG_MSG_EOF)) == 0)
                         is_eof_flag = true;
@@ -594,10 +634,10 @@ void ZMQComm::destroy() {
     }
     if (handle != nullptr) {
         delete handle;
-        ygglog_debug("Destroying socket: %s", address->address().c_str());
+        ygglog_debug << "Destroying socket: " << address->address();
         handle = nullptr;
     }
-    ygglog_debug("free_zmq_comm: finished");
+    ygglog_debug << "free_zmq_comm: finished";
 
     //TODO: THERE IS MORE TO DELETE?
 }
@@ -626,8 +666,8 @@ int ZMQComm::comm_nmsg() const {
         /* 	out = 1; */
         /* } */
         if (reply != nullptr) {
-            ygglog_debug("zmq_comm_nmsg(%s): nmsg = %d, nrep = %d",
-                         name.c_str(), reply->n_msg, reply->n_rep);
+            ygglog_debug << "zmq_comm_nmsg(" << name << ") : nmsg = " << reply->n_msg << ", nrep = "
+                         << reply->n_rep;
             out = reply->n_msg - reply->n_rep;
         }
     }
@@ -646,6 +686,8 @@ int ZMQComm::send(const char* data, const size_t &len) {
     int ret;
     size_t msgsiz;
     size_t prev = 0;
+    ///////// TODO
+    //set_reply_send();
     while (prev < len) {
         if ((len - prev) > YGG_MSG_MAX)
             msgsiz = YGG_MSG_MAX;
@@ -657,7 +699,7 @@ int ZMQComm::send(const char* data, const size_t &len) {
         auto res = handle->send(msg, ((prev < len) ? zmq::send_flags::sndmore : zmq::send_flags::none));
 
         if (!res.has_value()) {
-            ygglog_error("zmq_comm_send(%s): Error in zframe_send", name.c_str());
+            ygglog_error << "zmq_comm_send(" << name << ") : Error in zframe_send";
             break;
         }
     }
@@ -665,22 +707,22 @@ int ZMQComm::send(const char* data, const size_t &len) {
     ret = do_reply_send();
     if (ret < 0) {
         if (ret == -2) {
-            ygglog_error("zmq_comm_send(%s): EOF received", name.c_str());
+            ygglog_error << "zmq_comm_send(" << name << ") : EOF received";
         } else {
-            ygglog_error("zmq_comm_send(%s): Error in do_reply_send", name.c_str());
+            ygglog_error << "zmq_comm_send(" << name << ") : Error in do_reply_send";
         }
     }
 
 
-    ygglog_debug("zmq_comm_send(%s): returning %d", name.c_str(), ret);
+    ygglog_debug << "zmq_comm_send(" << name << ") : returning " << ret;
     return ret;
 }
 
 
 /*zframe_t* ZMQComm::recv_zframe() {
-    ygglog_debug("zmq_comm_recv_zframe(%s)", name.c_str());
+    ygglog_debug << "zmq_comm_recv_zframe(" << name << ") ";
     if (handle == nullptr) {
-        ygglog_error("zmq_comm_recv_zframe(%s): socket handle is nullptr", name.c_str());
+        ygglog_error << "zmq_comm_recv_zframe(" << name << ") : socket handle is nullptr";
         return nullptr;
     }
     clock_t start = clock();
@@ -691,17 +733,17 @@ int ZMQComm::send(const char* data, const size_t &len) {
         else if (nmsg > 0)
             break;
         else {
-            ygglog_debug("zmq_comm_recv_zframe(%s): no messages, sleep %d", name.c_str(),
+            ygglog_debug << "zmq_comm_recv_zframe(" << name << ") : no messages, sleep %d",
                          YGG_SLEEP_TIME);
             usleep(YGG_SLEEP_TIME);
         }
     }
-    ygglog_debug("zmq_comm_recv_zframe(%s): receiving", name.c_str());
+    ygglog_debug << "zmq_comm_recv_zframe(" << name << ") : receiving";
     zframe_t *out = nullptr;
     if (flags & COMM_FLAG_CLIENT_RESPONSE) {
         out = zframe_recv(handle);
         if (out == nullptr) {
-            ygglog_debug("zmq_comm_recv_zframe(%s): did not receive identity", name.c_str());
+            ygglog_debug << "zmq_comm_recv_zframe(" << name << ") : did not receive identity";
             return nullptr;
         }
         zframe_destroy(&out);
@@ -709,7 +751,7 @@ int ZMQComm::send(const char* data, const size_t &len) {
     }
     out = zframe_recv(handle);
     if (out == nullptr) {
-        ygglog_debug("zmq_comm_recv_zframe(%s): did not receive", name.c_str());
+        ygglog_debug << "zmq_comm_recv_zframe(" << name << ") : did not receive";
         return nullptr;
     }
     return out;
@@ -720,30 +762,30 @@ int ZMQComm::recv_time_limit(zmq::multipart_t &msgs) {
     while ((((double)(clock() - start))/CLOCKS_PER_SEC) < 180) {
         const int nmsg = comm_nmsg();
         if (nmsg < 0) {
-            ygglog_debug("zmq::recv(%s): did not receive", name.c_str());
+            ygglog_debug << "zmq::recv(" << name << ") : did not receive";
             return -1;
         } else if (nmsg > 0) {
             break;
         } else {
-            ygglog_debug("zmq_comm_recv_zframe(%s): no messages, sleep %d", name.c_str(),
-                         YGG_SLEEP_TIME);
+            ygglog_debug << "zmq_comm_recv_zframe(" << name << ") : no messages, sleep "
+                         << YGG_SLEEP_TIME;
             usleep(YGG_SLEEP_TIME);
         }
     }
 
-    ygglog_debug("zmq_comm_recv_zframe(%s): receiving", name.c_str());
+    ygglog_debug << "zmq_comm_recv_zframe(" << name << ") : receiving";
 
     if (flags & COMM_FLAG_CLIENT_RESPONSE) {
         zmq::message_t msg;
         auto resp = handle->recv(msg, zmq::recv_flags::none);
         if (!resp.has_value()) {
-            ygglog_debug("zmq_comm_recv_zframe(%s): did not receive identity", name.c_str());
+            ygglog_debug << "zmq_comm_recv_zframe(" << name << ") : did not receive identity";
             return -1;
         }
     }
     auto resp = zmq::recv_multipart(*handle, std::back_inserter(msgs));
     if (!resp.has_value()) {
-        ygglog_debug("zmq_comm_recv_zframe(%s): did not receive", name.c_str());
+        ygglog_debug << "zmq_comm_recv_zframe(" << name << ") : did not receive";
         return -1;
     }
 
@@ -761,12 +803,12 @@ int ZMQComm::recv_time_limit(zmq::multipart_t &msgs) {
   @returns int -1 if message could not be received. Length of the received
   message if message was received.
  */
-long ZMQComm::recv(char** data, const size_t &len, bool allow_realloc) {
+long ZMQComm::recv(char* data, const size_t &len, bool allow_realloc) {
     long ret = -1;
     zmq::multipart_t msgs;
-    ygglog_debug("zmq_comm_recv(%s)", name.c_str());
+    ygglog_debug << "zmq_comm_recv(" << name << ") ";
     if (handle == nullptr) {
-        ygglog_error("zmq_comm_recv(%s): socket handle is nullptr", name.c_str());
+        ygglog_error << "zmq_comm_recv(" << name << ") : socket handle is nullptr";
         return ret;
     }
 
@@ -777,7 +819,7 @@ long ZMQComm::recv(char** data, const size_t &len, bool allow_realloc) {
     while (true) {
         char* temp = msgs[0].data<char>();
         if (strncmp(temp, "ZMQ_SERVER_SIGNING_ON::", 23) == 0) {
-            ygglog_debug("zmq_comm_recv(%s): Received sign-on", name.c_str());
+            ygglog_debug << "zmq_comm_recv(" << name << ") : Received sign-on";
             std::string client_address = temp+23;
 
             // create a DEALER socket and connect to address
@@ -785,8 +827,8 @@ long ZMQComm::recv(char** data, const size_t &len, bool allow_realloc) {
             try {
                 client_socket = new ygg_sock_t(ZMQ_DEALER);
             } catch (...) {
-                ygglog_error("zmq_comm_recv(%s): Could not initalize the client side of the proxy socket to confirm signon",
-                             name.c_str());
+                ygglog_error << "zmq_comm_recv(" << name
+                             << ") : Could not initalize the client side of the proxy socket to confirm signon";
                 return ret;
             }
 
@@ -803,14 +845,14 @@ long ZMQComm::recv(char** data, const size_t &len, bool allow_realloc) {
                 resp = zmq::send_multipart(*client_socket, tmp);
             }
             if (!resp.has_value()) {
-                ygglog_error("zmq_comm_recv(%s): Error sending response message.", name.c_str());
+                ygglog_error << "zmq_comm_recv(" << name << ") : Error sending response message.";
                 delete client_socket;
                 return ret;
             }
             delete client_socket;
 
             if ((ret = recv_time_limit(msgs)) < 0) {
-                ygglog_debug("zmq_comm_recv(%s): did not receive", name.c_str());
+                ygglog_debug << "zmq_comm_recv(" << name << ") : did not receive";
                 return ret;
             }
         } else {
@@ -826,40 +868,40 @@ long ZMQComm::recv(char** data, const size_t &len, bool allow_realloc) {
     // Realloc and copy data
     if (len_recv > len) {
         if (allow_realloc) {
-            ygglog_debug("zmq_comm_recv(%s): reallocating buffer from %d to %d bytes.",
-                         name.c_str(), len, len_recv);
-            (*data) = (char*)realloc(*data, len_recv);
-            if (*data == nullptr) {
-                ygglog_error("zmq_comm_recv(%s): failed to realloc buffer.", name.c_str());
+            ygglog_debug << "zmq_comm_recv(" << name << ") : reallocating buffer from " << len << " to "
+                         << len_recv << " bytes.";
+            data = (char*)realloc(data, len_recv);
+            if (data == nullptr) {
+                ygglog_error << "zmq_comm_recv(" << name << ") : failed to realloc buffer.";
                 return -1;
             }
         } else {
-            ygglog_error("zmq_comm_recv(%s): buffer (%d bytes) is not large enough for message (%d bytes)",
-                         name.c_str(), len, len_recv);
+            ygglog_error << "zmq_comm_recv(" << name << ") : buffer (" << len
+                         << " bytes) is not large enough for message (" << len_recv << " bytes)";
             return -((int)(len_recv - 1));
         }
     }
-    strcpy(*data, "");
+    strcpy(data, "");
     for (auto& m: msgs) {
-        strncat(*data, m.data<char>(), m.size());
+        strncat(data, m.data<char>(), m.size());
     }
 
-    (*data)[len_recv-1] = '\0';
+    data[len_recv-1] = '\0';
     ret = (int)len_recv - 1;
     /*
     if (strlen(*data) != ret) {
-      ygglog_error("zmq_comm_recv(%s): Size of string (%d) doesn't match expected (%d)",
+      ygglog_error << "zmq_comm_recv(" << name << ") : Size of string (%d) doesn't match expected (%d)",
            name.c_str(), strlen(*data), ret);
       return -1;
     }
     */
     // Check reply
-    ret = check_reply_recv(*data, ret);
+    ret = check_reply_recv(data, ret);
     if (ret < 0) {
-        ygglog_error("zmq_comm_recv(%s): failed to check for reply socket.", name.c_str());
+        ygglog_error << "zmq_comm_recv(" << name << ") : failed to check for reply socket.";
         return ret;
     }
-    ygglog_debug("zmq_comm_recv(%s): returning %d", name.c_str(), ret);
+    ygglog_debug << "zmq_comm_recv(" << name << ") : returning " << ret;
     return ret;
 }
 
@@ -871,21 +913,21 @@ bool ZMQComm::connect_to_existing() {
         handle = new ygg_sock_t(ZMQ_PAIR);
     }
     if (handle == nullptr) {
-        ygglog_error("init_zmq_address: Could not initialize empty socket.");
+        ygglog_error << "init_zmq_address: Could not initialize empty socket.";
         flags &= ~COMM_FLAG_VALID;
         return false;
     }
     try {
         handle->connect(address->address());
     } catch (zmq::error_t &err) {
-        ygglog_error("init_zmq_address: Could not connect socket to address = %s  : %s",
-                     this->address->address().c_str(), err.what());
+        ygglog_error << "init_zmq_address: Could not connect socket to address = "
+                     << this->address->address() << " : " << err.what();
         delete handle;
 
         flags &= ~COMM_FLAG_VALID;
         return false;
     }
-    ygglog_debug("init_zmq_address: Connected socket to %s", this->address->address().c_str());
+    ygglog_debug << "init_zmq_address: Connected socket to " << this->address->address();
     if (this->name.empty()) {
         if (name.empty()) {
             this->name = "tempinitZMQ-" + this->address->address();
@@ -907,7 +949,7 @@ bool ZMQComm::connect_to_existing() {
  */
 static inline
 void ygg_zsys_shutdown() {
-  ygglog_error("Compiler flag 'ZMQINSTALLED' not defined so ZMQ bindings are disabled.");
+  ygglog_error << "Compiler flag 'ZMQINSTALLED' not defined so ZMQ bindings are disabled.");
 };
 
 /*!
@@ -915,7 +957,7 @@ void ygg_zsys_shutdown() {
  */
 static inline
 void* ygg_zsys_init() {
-  ygglog_error("Compiler flag 'ZMQINSTALLED' not defined so ZMQ bindings are disabled.");
+  ygglog_error << "Compiler flag 'ZMQINSTALLED' not defined so ZMQ bindings are disabled.");
   return nullptr;
 };
 
@@ -924,7 +966,7 @@ void* ygg_zsys_init() {
  */
 static inline
 void zmq_install_error() {
-  ygglog_error("Compiler flag 'ZMQINSTALLED' not defined so ZMQ bindings are disabled.");
+  ygglog_error << "Compiler flag 'ZMQINSTALLED' not defined so ZMQ bindings are disabled.");
 };
 
 /*!

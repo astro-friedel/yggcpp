@@ -10,8 +10,14 @@
 #endif
 #include <vector>
 namespace communication {
+#ifdef YGG_TEST
+namespace testing {
+class ygg_sock_tester;
+class ZMQComm_tester;
+}
+#endif
 namespace communicator {
-class ClientComm;
+//class ClientComm;
 static unsigned _zmq_rand_seeded = 0;
 static unsigned _last_port_set = 0;
 static int _last_port = 49152;
@@ -36,20 +42,24 @@ public:
 
     static zmq::context_t &get_context();
 
-    static void shutdown();
+    static void ctx_shutdown();
 
 #else
 
 #endif /*ZMQINSTALLED*/
-
+    void close();
     ~ygg_sock_t();
 
 #ifdef _OPENMP
     uint32_t tag;
     int type;
 private:
+#ifdef YGG_TEST
+    friend class testing::ygg_sock_tester;
+#endif
     static zmq::context_t ygg_s_process_ctx;
     static bool ctx_valid;
+    static std::vector<ygg_sock_t*> activeSockets;
 #endif
 };
 
@@ -105,28 +115,34 @@ typedef struct zmq_reply_t {
 
 class ZMQComm : public CommBase<ygg_sock_t, zmq_reply_t> {
 public:
-    explicit ZMQComm(const std::string &name = "", utils::Address *address = new utils::Address(),
+    explicit ZMQComm(const std::string name = "", utils::Address *address = new utils::Address(),
                      DIRECTION direction = NONE);
 
     //explicit ZMQComm(Comm_t* comm);
     ~ZMQComm() override;
 
-    int send(const char *data, const size_t &len) override;
-    int send(const dtype_t* dtype) override;
-    long recv(dtype_t* dtype) override;
-    long recv(char **data, const size_t &len, bool allow_realloc) override;
 
     //void open() override;
     //void close() override;
     int comm_nmsg() const override;
+    using Comm_t::send;
+    using Comm_t::recv;
 
+#ifndef YGG_TEST
 protected:
-    int new_address();
+#endif
+    virtual bool new_address();
     void init() override;
+    int send(const char *data, const size_t &len) override;
+    long recv(char *data, const size_t &len, bool allow_realloc) override;
 
 private:
-    friend ClientComm;
-    friend ServerComm;
+    friend class ClientComm;
+    friend class ServerComm;
+#ifdef YGG_TEST
+    friend class testing::ZMQComm_tester;
+#endif
+
     ygg_sock_t *sock;
 
     std::string set_reply_send();
